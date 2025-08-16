@@ -24,6 +24,8 @@ try:
     from sqlalchemy import create_engine, text
     from sqlalchemy.exc import SQLAlchemyError
     from database import StockInfo, get_session, init_db
+    from request_headers import get_headers, header_rotator
+    from akshare_wrapper import ak_wrapper
 except ImportError as e:
     print(f"导入依赖库失败: {e}")
     print("请确保已安装所需依赖: pip install akshare pandas sqlalchemy")
@@ -58,6 +60,25 @@ class StockInfoDownloader:
         self.session = None
         self.engine = None
         self.init_database()
+        self.setup_akshare_headers()
+    
+    def setup_akshare_headers(self):
+        """设置AKShare的请求头"""
+        try:
+            # 设置AKShare的请求头
+            import akshare as ak
+            # 获取股票数据专用请求头
+            headers = get_headers('stock_data')
+            
+            # 设置AKShare的请求头（如果支持的话）
+            if hasattr(ak, 'set_headers'):
+                ak.set_headers(headers)
+                logger.info("已设置AKShare请求头")
+            else:
+                logger.info("AKShare不支持自定义请求头设置")
+                
+        except Exception as e:
+            logger.warning(f"设置AKShare请求头失败: {e}")
     
     def init_database(self):
         """初始化数据库连接"""
@@ -96,8 +117,12 @@ class StockInfoDownloader:
             
             # 获取沪深A股列表
             try:
+                # 轮换请求头
+                headers = header_rotator.get_headers('stock_data')
+                logger.debug(f"使用请求头: {headers['User-Agent'][:50]}...")
+                
                 # 上海证券交易所A股
-                sh_stocks = ak.stock_info_a_code_name()
+                sh_stocks = ak_wrapper.stock_info_a_code_name()
                 if not sh_stocks.empty:
                     for _, row in sh_stocks.iterrows():
                         stock_list.append({
@@ -112,7 +137,7 @@ class StockInfoDownloader:
             
             # 深圳证券交易所A股
             try:
-                sz_stocks = ak.stock_info_a_code_name()
+                sz_stocks = ak_wrapper.stock_info_a_code_name()
                 if not sz_stocks.empty:
                     for _, row in sz_stocks.iterrows():
                         stock_list.append({
@@ -127,7 +152,7 @@ class StockInfoDownloader:
             
             # 创业板
             try:
-                cy_stocks = ak.stock_info_a_code_name()
+                cy_stocks = ak_wrapper.stock_info_a_code_name()
                 if not cy_stocks.empty:
                     for _, row in cy_stocks.iterrows():
                         stock_list.append({
@@ -142,7 +167,7 @@ class StockInfoDownloader:
             
             # 科创板
             try:
-                kc_stocks = ak.stock_info_a_code_name()
+                kc_stocks = ak_wrapper.stock_info_a_code_name()
                 if not kc_stocks.empty:
                     for _, row in kc_stocks.iterrows():
                         stock_list.append({
@@ -188,8 +213,12 @@ class StockInfoDownloader:
                 
                 # 获取股票基本信息
                 try:
+                    # 轮换请求头
+                    headers = header_rotator.get_headers('stock_data')
+                    logger.debug(f"获取股票 {stock_code} 信息，使用请求头: {headers['User-Agent'][:50]}...")
+                    
                     # 获取股票实时信息
-                    stock_info = ak.stock_individual_info_em(symbol=stock_code)
+                    stock_info = ak_wrapper.stock_individual_info_em(symbol=stock_code)
                     if not stock_info.empty:
                         # 提取股本信息
                         for _, row in stock_info.iterrows():
@@ -217,8 +246,27 @@ class StockInfoDownloader:
                 
                 # 获取股票实时行情信息
                 try:
-                    real_time_info = ak.stock_zh_a_spot_em()
-                    if not real_time_info.empty:
+                    # 添加重试机制
+                    max_retries = 3
+                    retry_count = 0
+                    real_time_info = None
+                    
+                    while retry_count < max_retries and real_time_info is None:
+                        try:
+                            logger.debug(f"尝试获取股票 {stock_code} 实时行情，第 {retry_count + 1} 次")
+                            real_time_info = ak.stock_zh_a_spot_em()
+                            break
+                        except Exception as retry_e:
+                            retry_count += 1
+                            if retry_count < max_retries:
+                                logger.warning(f"获取股票 {stock_code} 实时行情失败，第 {retry_count} 次重试: {retry_e}")
+                                import time
+                                time.sleep(2)  # 等待2秒后重试
+                            else:
+                                logger.error(f"获取股票 {stock_code} 实时行情最终失败: {retry_e}")
+                                raise retry_e
+                    
+                    if real_time_info is not None and not real_time_info.empty:
                         # 找到对应的股票
                         stock_row = real_time_info[real_time_info['代码'] == stock_code]
                         if not stock_row.empty:

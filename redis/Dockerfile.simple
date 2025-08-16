@@ -1,0 +1,28 @@
+# 使用Alpine Linux基础镜像
+FROM alpine:3.18
+
+# 设置工作目录
+WORKDIR /data
+
+# 安装Redis
+RUN apk add --no-cache redis
+
+# 创建数据目录
+RUN mkdir -p /data
+
+# 创建Redis配置文件
+RUN echo 'dir /data' > /etc/redis.conf && \
+    echo 'appendonly yes' >> /etc/redis.conf && \
+    echo 'appendfilename "appendonly.aof"' >> /etc/redis.conf && \
+    echo 'appendfsync everysec' >> /etc/redis.conf && \
+    echo 'save 900 1' >> /etc/redis.conf && \
+    echo 'save 300 10' >> /etc/redis.conf && \
+    echo 'save 60 10000' >> /etc/redis.conf && \
+    echo 'bind 0.0.0.0' >> /etc/redis.conf && \
+    echo 'port 6379' >> /etc/redis.conf
+
+# 暴露端口
+EXPOSE 6379
+
+# 启动Redis（使用配置文件，以root用户运行）
+CMD ["redis-server", "/etc/redis.conf"]

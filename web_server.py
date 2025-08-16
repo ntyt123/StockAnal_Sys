@@ -2101,8 +2101,29 @@ cleaner_thread = threading.Thread(target=run_task_cleaner)
 cleaner_thread.daemon = True
 cleaner_thread.start()
 
-# 启动股票信息下载定时任务
-start_stock_download_scheduler()
+# 启动股票信息下载定时任务（在后台运行，不阻塞Flask启动）
+def start_background_tasks():
+    """在后台启动任务，不阻塞Flask应用"""
+    try:
+        # 检查是否跳过初始下载
+        skip_initial = os.getenv('SKIP_INITIAL_DOWNLOAD', 'false').lower() == 'true'
+        
+        if skip_initial:
+            app.logger.info("跳过启动时的股票数据下载")
+            # 只启动定时任务，不立即下载
+            schedule.every().day.at("16:00").do(download_stock_info)
+            app.logger.info("股票信息下载定时任务已设置，每天16:00执行")
+        else:
+            # 延迟启动，让Flask先启动完成
+            time.sleep(5)
+            start_stock_download_scheduler()
+            
+    except Exception as e:
+        app.logger.error(f"后台任务启动失败: {e}")
+
+background_thread = threading.Thread(target=start_background_tasks)
+background_thread.daemon = True
+background_thread.start()
 
 if __name__ == '__main__':
     # 将 host 设置为 '0.0.0.0' 使其支持所有网络接口访问

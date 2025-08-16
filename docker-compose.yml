@@ -10,6 +10,7 @@ services:
       - FLASK_DEBUG=1
       - FLASK_APP=web_server.py
       - PYTHONPATH=/app
+      - SKIP_INITIAL_DOWNLOAD=true  # 跳过启动时的股票下载
     volumes:
       - sqlite_data:/app/data # 如果需要持久化数据，请使用sqlite_data 在env文件中设置USE_DATABASE=True
       - .env:/app/.env # 环境变量.env文件
@@ -18,17 +19,26 @@ services:
       - /app/.git # 排除git目录
     depends_on:
       - redis
-    # 开发环境使用nodemon或watchdog进行代码监控
-    command: ['python', '-m', 'flask', 'run', '--host=0.0.0.0', '--port=8888', '--reload']
-    # 或者使用gunicorn的热重载
-    # command: ["gunicorn", "--bind", "0.0.0.0:8888", "--workers", "1", "--reload", "--reload-extra-file", "/app", "web_server:app"]
-  # redis 缓存
+    # 使用新的启动脚本，快速启动
+    command: ['python', 'start_app.py']
+    networks:
+      - stockanal_network
+  
+  # redis 缓存 - 使用简化的本地构建
   redis:
-    image: redis:6.2-alpine
+    build:
+      context: ./redis
+      dockerfile: Dockerfile.simple
     ports:
       - '6379:6379'
     volumes:
       - redis_data:/data
+    networks:
+      - stockanal_network
+
+networks:
+  stockanal_network:
+    driver: bridge
 
 volumes:
   redis_data:
