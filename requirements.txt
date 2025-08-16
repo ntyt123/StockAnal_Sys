@@ -31,3 +31,6 @@ tavily-python # Tavily客户端库
 # 部署工具
 supervisor==4.2.5  # 进程管理
 redis==4.5.4  # 可选的缓存后端
+
+# 股票信息下载器依赖
+schedule==1.2.0  # 定时任务调度

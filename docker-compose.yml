@@ -4,24 +4,32 @@ services:
   stockanal_sys:
     build: .
     ports:
-      - "8888:8888"
+      - '8888:8888'
     environment:
-      - FLASK_ENV=production
-      - FLASK_DEBUG=0
+      - FLASK_ENV=development
+      - FLASK_DEBUG=1
       - FLASK_APP=web_server.py
+      - PYTHONPATH=/app
     volumes:
-    #  - sqlite_data:/app/data # 如果需要持久化数据，请使用sqlite_data 在env文件中设置USE_DATABASE=True
+      - sqlite_data:/app/data # 如果需要持久化数据，请使用sqlite_data 在env文件中设置USE_DATABASE=True
       - .env:/app/.env # 环境变量.env文件
+      - ./:/app # 使用相对路径，确保代码同步
+      - /app/__pycache__ # 排除Python缓存文件
+      - /app/.git # 排除git目录
     depends_on:
       - redis
+    # 开发环境使用nodemon或watchdog进行代码监控
+    command: ['python', '-m', 'flask', 'run', '--host=0.0.0.0', '--port=8888', '--reload']
+    # 或者使用gunicorn的热重载
+    # command: ["gunicorn", "--bind", "0.0.0.0:8888", "--workers", "1", "--reload", "--reload-extra-file", "/app", "web_server:app"]
   # redis 缓存
   redis:
     image: redis:6.2-alpine
     ports:
-      - "6379:6379"
+      - '6379:6379'
     volumes:
       - redis_data:/data
 
 volumes:
   redis_data:
-  #sqlite_data: 
+  sqlite_data:

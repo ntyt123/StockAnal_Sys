@@ -24,7 +24,7 @@ from flask_caching import Cache
 import threading
 import sys
 from flask_swagger_ui import get_swaggerui_blueprint
-from database import get_session, StockInfo, AnalysisResult, Portfolio, USE_DATABASE
+from database import get_session, StockInfo, AnalysisResult, Portfolio, USE_DATABASE, init_db
 from dotenv import load_dotenv
 from industry_analyzer import IndustryAnalyzer
 from fundamental_analyzer import FundamentalAnalyzer
@@ -34,6 +34,7 @@ from stock_qa import StockQA
 from risk_monitor import RiskMonitor
 from index_industry_analyzer import IndexIndustryAnalyzer
 from news_fetcher import news_fetcher, start_news_scheduler
+import schedule
 
 # 加载环境变量
 load_dotenv()
@@ -546,6 +547,12 @@ def risk_monitor_page():
 @app.route('/qa')
 def qa_page():
     return render_template('qa.html')
+
+
+# 辅助选股页面
+@app.route('/select_stock')
+def select_stock_page():
+    return render_template('select_stock.html')
 
 
 # 行业分析页面
@@ -1662,10 +1669,440 @@ def get_latest_news():
         app.logger.error(f"获取最新新闻数据时出错: {str(e)}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
+# 手动触发股票信息下载的API端点
+@app.route('/api/download_stock_info', methods=['POST'])
+def api_download_stock_info():
+    """手动触发股票信息下载"""
+    try:
+        app.logger.info("收到手动下载股票信息请求")
+        
+        # 检查是否已经在下载中
+        if hasattr(app, 'stock_downloading') and app.stock_downloading:
+            return jsonify({
+                'success': False, 
+                'message': '股票信息下载任务正在进行中，请稍后再试'
+            }), 400
+        
+        # 设置下载状态
+        app.stock_downloading = True
+        
+        # 在后台线程中执行下载
+        def download_in_background():
+            try:
+                success = download_stock_info()
+                if success:
+                    app.logger.info("手动下载股票信息完成")
+                else:
+                    app.logger.error("手动下载股票信息失败")
+            finally:
+                app.stock_downloading = False
+        
+        download_thread = threading.Thread(target=download_in_background)
+        download_thread.daemon = True
+        download_thread.start()
+        
+        return jsonify({
+            'success': True, 
+            'message': '股票信息下载任务已启动，请稍后查看日志'
+        })
+        
+    except Exception as e:
+        app.logger.error(f"手动下载股票信息时出错: {e}")
+        app.stock_downloading = False
+        return jsonify({
+            'success': False, 
+            'error': str(e)
+        }), 500
+
+# 获取股票信息下载状态的API端点
+@app.route('/api/stock_download_status', methods=['GET'])
+def api_stock_download_status():
+    """获取股票信息下载状态"""
+    try:
+        # 检查数据库中的股票数量
+        if not USE_DATABASE:
+            return jsonify({
+                'success': False,
+                'message': '数据库未启用'
+            })
+        
+        session = get_session()
+        count = session.query(StockInfo).filter(StockInfo.market_type == 'A').count()
+        session.close()
+        
+        # 检查是否正在下载
+        is_downloading = getattr(app, 'stock_downloading', False)
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'stock_count': count,
+                'is_downloading': is_downloading,
+                'has_data': count > 0,
+                'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+        })
+        
+    except Exception as e:
+        app.logger.error(f"获取股票下载状态时出错: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# 获取股票列表的API端点
+@app.route('/api/stocks', methods=['GET'])
+def api_get_stocks():
+    """获取股票列表，支持筛选"""
+    try:
+        # 获取查询参数
+        market_type = request.args.get('market_type', 'A')
+        industry = request.args.get('industry', '')
+        limit = request.args.get('limit', 1000, type=int)
+        
+        if not USE_DATABASE:
+            return jsonify({
+                'success': False,
+                'message': '数据库未启用'
+            })
+        
+        session = get_session()
+        
+        # 构建查询
+        query = session.query(StockInfo).filter(StockInfo.market_type == market_type)
+        
+        # 如果指定了行业，添加行业筛选
+        if industry:
+            query = query.filter(StockInfo.industry.like(f'%{industry}%'))
+        
+        # 限制返回数量
+        stocks = query.limit(limit).all()
+        session.close()
+        
+        # 转换为字典格式
+        stock_list = []
+        for stock in stocks:
+            stock_list.append({
+                'code': stock.stock_code,
+                'name': stock.stock_name,
+                'industry': stock.industry,
+                'market_type': stock.market_type,
+                'updated_at': stock.updated_at.strftime('%Y-%m-%d %H:%M:%S') if stock.updated_at else None
+            })
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'stocks': stock_list,
+                'total': len(stock_list),
+                'market_type': market_type,
+                'industry': industry
+            }
+        })
+        
+    except Exception as e:
+        app.logger.error(f"获取股票列表时出错: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# 股票信息下载器相关函数
+def check_stock_data_exists():
+    """检查数据库中是否存在股票数据"""
+    try:
+        if not USE_DATABASE:
+            return False
+        
+        session = get_session()
+        count = session.query(StockInfo).filter(StockInfo.market_type == 'A').count()
+        session.close()
+        
+        app.logger.info(f"数据库中现有A股数据: {count} 条")
+        return count > 0
+    except Exception as e:
+        app.logger.error(f"检查股票数据时出错: {e}")
+        return False
+
+def download_stock_info():
+    """下载A股信息到数据库"""
+    try:
+        app.logger.info("开始执行A股信息下载任务...")
+        
+        # 导入必要的模块
+        import akshare as ak
+        from datetime import datetime
+        from sqlalchemy import text
+        
+        # 获取A股列表
+        stock_list = []
+        
+        try:
+            # 获取沪深A股列表
+            stocks = ak.stock_info_a_code_name()
+            if not stocks.empty:
+                for _, row in stocks.iterrows():
+                    stock_list.append({
+                        'stock_code': str(row['code']),
+                        'stock_name': str(row['name']),
+                        'market_type': 'A',
+                        'industry': '未知',
+                        'updated_at': datetime.now()
+                    })
+                app.logger.info(f"获取A股列表成功，共 {len(stocks)} 只")
+            else:
+                app.logger.warning("获取的A股列表为空")
+                return False
+                
+        except Exception as e:
+            app.logger.error(f"获取A股列表失败: {e}")
+            return False
+        
+        # 获取详细信息
+        detailed_stocks = []
+        total = len(stock_list)
+        
+        for i, stock in enumerate(stock_list, 1):
+            try:
+                if i % 100 == 0:
+                    app.logger.info(f"处理进度: {i}/{total} ({i/total*100:.1f}%)")
+                
+                stock_code = stock['stock_code']
+                
+                # 获取股票基本信息
+                try:
+                    stock_info = ak.stock_individual_info_em(symbol=stock_code)
+                    if not stock_info.empty:
+                        # 提取股本信息
+                        for _, info_row in stock_info.iterrows():
+                            item = str(info_row['item']).strip()
+                            value = str(info_row['value']).strip()
+                            
+                            if '总股本' in item:
+                                try:
+                                    stock['total_shares'] = int(float(value))
+                                except:
+                                    stock['total_shares'] = None
+                            elif '流通股' in item:
+                                try:
+                                    stock['circulating_shares'] = int(float(value))
+                                except:
+                                    stock['circulating_shares'] = None
+                        
+                except Exception as e:
+                    app.logger.debug(f"获取股票 {stock_code} 详细信息失败: {e}")
+                    stock['total_shares'] = None
+                    stock['circulating_shares'] = None
+                
+                # 获取股票实时行情信息
+                try:
+                    real_time_info = ak.stock_zh_a_spot_em()
+                    if not real_time_info.empty:
+                        stock_row = real_time_info[real_time_info['代码'] == stock_code]
+                        if not stock_row.empty:
+                            row = stock_row.iloc[0]
+                            
+                            # 提取财务指标
+                            try:
+                                stock['pe_ratio'] = float(row['市盈率-动态']) if row['市盈率-动态'] != '-' else None
+                            except:
+                                stock['pe_ratio'] = None
+                            
+                            try:
+                                stock['pb_ratio'] = float(row['市净率']) if row['市净率'] != '-' else None
+                            except:
+                                stock['pb_ratio'] = None
+                            
+                            try:
+                                stock['market_value'] = float(row['总市值']) if row['总市值'] != '-' else None
+                            except:
+                                stock['market_value'] = None
+                            
+                            try:
+                                stock['circulating_value'] = float(row['流通市值']) if row['流通市值'] != '-' else None
+                            except:
+                                stock['circulating_value'] = None
+                            
+                except Exception as e:
+                    app.logger.debug(f"获取股票 {stock_code} 实时行情失败: {e}")
+                    stock['pe_ratio'] = None
+                    stock['pb_ratio'] = None
+                    stock['market_value'] = None
+                    stock['circulating_value'] = None
+                
+                # 获取公司概况信息
+                try:
+                    profile_info = ak.stock_profile_cninfo(symbol=stock_code)
+                    if not profile_info.empty:
+                        row = profile_info.iloc[0]
+                        
+                        # 提取公司信息
+                        stock['company_name'] = str(row.get('公司名称', ''))
+                        stock['english_name'] = str(row.get('英文名称', ''))
+                        stock['former_name'] = str(row.get('曾用简称', ''))
+                        stock['legal_representative'] = str(row.get('法人代表', ''))
+                        stock['registered_capital'] = str(row.get('注册资金', ''))
+                        stock['establishment_date'] = str(row.get('成立日期', ''))
+                        stock['list_date'] = str(row.get('上市日期', ''))
+                        stock['website'] = str(row.get('官方网站', ''))
+                        stock['email'] = str(row.get('电子邮箱', ''))
+                        stock['phone'] = str(row.get('联系电话', ''))
+                        stock['fax'] = str(row.get('传真', ''))
+                        stock['registered_address'] = str(row.get('注册地址', ''))
+                        stock['office_address'] = str(row.get('办公地址', ''))
+                        stock['postal_code'] = str(row.get('邮政编码', ''))
+                        stock['main_business'] = str(row.get('主营业务', ''))
+                        stock['business_scope'] = str(row.get('经营范围', ''))
+                        stock['company_intro'] = str(row.get('机构简介', ''))
+                        stock['selected_indices'] = str(row.get('入选指数', ''))
+                        
+                        # 更新行业信息
+                        if row.get('所属行业'):
+                            stock['industry'] = str(row['所属行业'])
+                        
+                except Exception as e:
+                    app.logger.debug(f"获取股票 {stock_code} 公司概况失败: {e}")
+                    # 设置默认值
+                    stock['company_name'] = stock['stock_name']
+                    stock['english_name'] = ''
+                    stock['former_name'] = ''
+                    stock['legal_representative'] = ''
+                    stock['registered_capital'] = ''
+                    stock['establishment_date'] = ''
+                    stock['list_date'] = ''
+                    stock['website'] = ''
+                    stock['email'] = ''
+                    stock['phone'] = ''
+                    stock['fax'] = ''
+                    stock['registered_address'] = ''
+                    stock['office_address'] = ''
+                    stock['postal_code'] = ''
+                    stock['main_business'] = ''
+                    stock['business_scope'] = ''
+                    stock['company_intro'] = ''
+                    stock['selected_indices'] = ''
+                
+                detailed_stocks.append(stock)
+                
+                # 避免请求过于频繁
+                time.sleep(0.1)
+                
+            except Exception as e:
+                app.logger.warning(f"处理股票 {stock_code} 时出错: {e}")
+                continue
+        
+        # 保存到数据库
+        try:
+            session = get_session()
+            
+            # 清空现有A股数据
+            session.execute(text("DELETE FROM stock_info WHERE market_type = 'A'"))
+            app.logger.info("已清空现有A股数据")
+            
+            # 批量插入新数据
+            for stock in detailed_stocks:
+                stock_info = StockInfo(
+                    stock_code=stock['stock_code'],
+                    stock_name=stock['stock_name'],
+                    market_type=stock['market_type'],
+                    industry=stock['industry'],
+                    updated_at=stock['updated_at'],
+                    
+                    # 基础信息
+                    exchange='',
+                    company_name=stock.get('company_name', ''),
+                    english_name=stock.get('english_name', ''),
+                    former_name=stock.get('former_name', ''),
+                    
+                    # 股本信息
+                    total_shares=stock.get('total_shares'),
+                    circulating_shares=stock.get('circulating_shares'),
+                    
+                    # 财务指标
+                    pe_ratio=stock.get('pe_ratio'),
+                    pb_ratio=stock.get('pb_ratio'),
+                    market_value=stock.get('market_value'),
+                    circulating_value=stock.get('circulating_value'),
+                    
+                    # 公司信息
+                    legal_representative=stock.get('legal_representative', ''),
+                    registered_capital=stock.get('registered_capital', ''),
+                    establishment_date=stock.get('establishment_date', ''),
+                    list_date=stock.get('list_date', ''),
+                    website=stock.get('website', ''),
+                    email=stock.get('email', ''),
+                    phone=stock.get('phone', ''),
+                    fax=stock.get('fax', ''),
+                    registered_address=stock.get('registered_address', ''),
+                    office_address=stock.get('office_address', ''),
+                    postal_code=stock.get('postal_code', ''),
+                    main_business=stock.get('main_business', ''),
+                    business_scope=stock.get('business_scope', ''),
+                    company_intro=stock.get('company_intro', ''),
+                    selected_indices=stock.get('selected_indices', '')
+                )
+                session.add(stock_info)
+            
+            # 提交事务
+            session.commit()
+            app.logger.info(f"成功保存 {len(detailed_stocks)} 只A股信息到数据库")
+            session.close()
+            
+            return True
+            
+        except Exception as e:
+            app.logger.error(f"保存股票数据到数据库失败: {e}")
+            if session:
+                session.rollback()
+                session.close()
+            return False
+            
+    except Exception as e:
+        app.logger.error(f"下载股票信息任务执行失败: {e}")
+        return False
+
+def start_stock_download_scheduler():
+    """启动股票信息下载定时任务"""
+    try:
+        # 检查是否需要立即下载数据
+        if not check_stock_data_exists():
+            app.logger.info("数据库中没有股票数据，立即开始下载...")
+            if download_stock_info():
+                app.logger.info("初始股票数据下载完成")
+            else:
+                app.logger.error("初始股票数据下载失败")
+        else:
+            app.logger.info("数据库中已有股票数据，无需立即下载")
+        
+        # 设置定时任务 - 每天16:00执行
+        schedule.every().day.at("16:00").do(download_stock_info)
+        app.logger.info("股票信息下载定时任务已设置，每天16:00执行")
+        
+        # 启动定时任务线程
+        def run_scheduler():
+            while True:
+                try:
+                    schedule.run_pending()
+                    time.sleep(60)  # 每分钟检查一次
+                except Exception as e:
+                    app.logger.error(f"定时任务调度器出错: {e}")
+                    time.sleep(60)
+        
+        scheduler_thread = threading.Thread(target=run_scheduler)
+        scheduler_thread.daemon = True
+        scheduler_thread.start()
+        app.logger.info("股票信息下载定时任务线程已启动")
+        
+    except Exception as e:
+        app.logger.error(f"启动股票信息下载定时任务失败: {e}")
+
 # 在应用启动时启动清理线程（保持原有代码不变）
 cleaner_thread = threading.Thread(target=run_task_cleaner)
 cleaner_thread.daemon = True
 cleaner_thread.start()
+
+# 启动股票信息下载定时任务
+start_stock_download_scheduler()
 
 if __name__ == '__main__':
     # 将 host 设置为 '0.0.0.0' 使其支持所有网络接口访问
