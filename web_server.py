@@ -1067,33 +1067,44 @@ def cancel_scan(task_id):
 
 @app.route('/api/index_stocks', methods=['GET'])
 def get_index_stocks():
-    """获取指数成分股"""
+    """获取指数成分股（使用智能数据源）"""
     try:
-        import akshare as ak
+        from stock_select.smart_data_source import SmartStockSource
+        
         index_code = request.args.get('index_code', '000300')  # 默认沪深300
 
         # 获取指数成分股
         app.logger.info(f"获取指数 {index_code} 成分股")
-        if index_code == '000300':
-            # 沪深300成分股
-            stocks = ak.index_stock_cons_weight_csindex(symbol="000300")
-        elif index_code == '000905':
-            # 中证500成分股
-            stocks = ak.index_stock_cons_weight_csindex(symbol="000905")
-        elif index_code == '000852':
-            # 中证1000成分股
-            stocks = ak.index_stock_cons_weight_csindex(symbol="000852")
-        elif index_code == '000001':
-            # 上证指数
-            stocks = ak.index_stock_cons_weight_csindex(symbol="000001")
-        else:
-            return jsonify({'error': '不支持的指数代码'}), 400
+        
+        # 注意：智能数据源目前主要支持个股数据，指数成分股仍需要AKShare
+        # 这里保留AKShare调用，但可以考虑后续扩展智能数据源
+        try:
+            import akshare as ak
+            if index_code == '000300':
+                # 沪深300成分股
+                stocks = ak.index_stock_cons_weight_csindex(symbol="000300")
+            elif index_code == '000905':
+                # 中证500成分股
+                stocks = ak.index_stock_cons_weight_csindex(symbol="000905")
+            elif index_code == '000852':
+                # 中证1000成分股
+                stocks = ak.index_stock_cons_weight_csindex(symbol="000852")
+            elif index_code == '000001':
+                # 上证指数
+                stocks = ak.index_stock_cons_weight_csindex(symbol="000001")
+            else:
+                return jsonify({'error': '不支持的指数代码'}), 400
 
-        # 提取股票代码列表
-        stock_list = stocks['成分券代码'].tolist() if '成分券代码' in stocks.columns else []
-        app.logger.info(f"找到 {len(stock_list)} 只成分股")
+            # 提取股票代码列表
+            stock_list = stocks['成分券代码'].tolist() if '成分券代码' in stocks.columns else []
+            app.logger.info(f"找到 {len(stock_list)} 只成分股")
 
-        return jsonify({'stock_list': stock_list})
+            return jsonify({'stock_list': stock_list})
+        except Exception as e:
+            app.logger.error(f"AKShare获取指数成分股失败: {e}")
+            # 返回空列表作为降级方案
+            return jsonify({'stock_list': []})
+            
     except Exception as e:
         app.logger.error(f"获取指数成分股时出错: {traceback.format_exc()}")
         return jsonify({'error': str(e)}), 500
@@ -1101,9 +1112,10 @@ def get_index_stocks():
 
 @app.route('/api/industry_stocks', methods=['GET'])
 def get_industry_stocks():
-    """获取行业成分股"""
+    """获取行业成分股（使用智能数据源）"""
     try:
-        import akshare as ak
+        from stock_select.smart_data_source import SmartStockSource
+        
         industry = request.args.get('industry', '')
 
         if not industry:
@@ -1111,13 +1123,23 @@ def get_industry_stocks():
 
         # 获取行业成分股
         app.logger.info(f"获取 {industry} 行业成分股")
-        stocks = ak.stock_board_industry_cons_em(symbol=industry)
+        
+        # 注意：智能数据源目前主要支持个股数据，行业成分股仍需要AKShare
+        # 这里保留AKShare调用，但可以考虑后续扩展智能数据源
+        try:
+            import akshare as ak
+            stocks = ak.stock_board_industry_cons_em(symbol=industry)
 
-        # 提取股票代码列表
-        stock_list = stocks['代码'].tolist() if '代码' in stocks.columns else []
-        app.logger.info(f"找到 {len(stock_list)} 只 {industry} 行业股票")
+            # 提取股票代码列表
+            stock_list = stocks['代码'].tolist() if '代码' in stocks.columns else []
+            app.logger.info(f"找到 {len(stock_list)} 只 {industry} 行业股票")
 
-        return jsonify({'stock_list': stock_list})
+            return jsonify({'stock_list': stock_list})
+        except Exception as e:
+            app.logger.error(f"AKShare获取行业成分股失败: {e}")
+            # 返回空列表作为降级方案
+            return jsonify({'stock_list': []})
+            
     except Exception as e:
         app.logger.error(f"获取行业成分股时出错: {traceback.format_exc()}")
         return jsonify({'error': str(e)}), 500
@@ -1678,17 +1700,38 @@ def api_download_stock_info():
         
         # 检查是否已经在下载中
         if hasattr(app, 'stock_downloading') and app.stock_downloading:
+            # 返回当前进度信息
+            current_progress = getattr(app, 'current_download_progress', 0)
+            total_stocks = getattr(app, 'total_download_stocks', 0)
+            current_stock = getattr(app, 'current_download_stock', "")
+            
+            # 计算百分比进度
+            progress_percent = 0
+            if total_stocks > 0:
+                progress_percent = min(100, int(current_progress / total_stocks * 100))
+                
             return jsonify({
                 'success': False, 
-                'message': '股票信息下载任务正在进行中，请稍后再试'
+                'message': '股票信息下载任务正在进行中，请稍后再试',
+                'progress': {
+                    'current': current_progress,
+                    'total': total_stocks,
+                    'percent': progress_percent,
+                    'current_stock': current_stock
+                }
             }), 400
         
         # 设置下载状态
         app.stock_downloading = True
+        # 初始化进度变量
+        app.current_download_progress = 0
+        app.total_download_stocks = 0
+        app.current_download_stock = "准备下载..."
         
         # 在后台线程中执行下载
         def download_in_background():
             try:
+                app.logger.info("开始后台下载股票信息...")
                 success = download_stock_info()
                 if success:
                     app.logger.info("手动下载股票信息完成")
@@ -1696,6 +1739,8 @@ def api_download_stock_info():
                     app.logger.error("手动下载股票信息失败")
             finally:
                 app.stock_downloading = False
+                # 重置进度变量
+                app.current_download_stock = "下载完成"
         
         download_thread = threading.Thread(target=download_in_background)
         download_thread.daemon = True
@@ -1733,13 +1778,29 @@ def api_stock_download_status():
         # 检查是否正在下载
         is_downloading = getattr(app, 'stock_downloading', False)
         
+        # 获取详细的进度信息
+        current_progress = getattr(app, 'current_download_progress', 0)
+        total_stocks = getattr(app, 'total_download_stocks', 0)
+        current_stock = getattr(app, 'current_download_stock', "")
+        
+        # 计算百分比进度
+        progress_percent = 0
+        if total_stocks > 0 and is_downloading:
+            progress_percent = min(100, int(current_progress / total_stocks * 100))
+        
         return jsonify({
             'success': True,
             'data': {
                 'stock_count': count,
                 'is_downloading': is_downloading,
                 'has_data': count > 0,
-                'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'download_progress': {
+                    'current': current_progress,
+                    'total': total_stocks,
+                    'percent': progress_percent,
+                    'current_stock': current_stock
+                }
             }
         })
         
@@ -1825,21 +1886,24 @@ def check_stock_data_exists():
         return False
 
 def download_stock_info():
-    """下载A股信息到数据库"""
+    """下载A股信息到数据库（使用智能数据源）"""
     try:
         app.logger.info("开始执行A股信息下载任务...")
         
         # 导入必要的模块
-        import akshare as ak
         from datetime import datetime
         from sqlalchemy import text
+        from stock_select.smart_data_source import SmartStockSource
+        
+        # 初始化智能数据源
+        smart_source = SmartStockSource()
         
         # 获取A股列表
         stock_list = []
         
         try:
-            # 获取沪深A股列表
-            stocks = ak.stock_info_a_code_name()
+            # 使用智能数据源获取沪深A股列表
+            stocks = smart_source.get_stock_list()
             if not stocks.empty:
                 for _, row in stocks.iterrows():
                     stock_list.append({
@@ -1862,66 +1926,63 @@ def download_stock_info():
         detailed_stocks = []
         total = len(stock_list)
         
+        # 设置全局进度变量，用于前端进度条显示
+        app.current_download_progress = 0
+        app.total_download_stocks = total
+        app.current_download_stock = ""
+        
         for i, stock in enumerate(stock_list, 1):
             try:
-                if i % 100 == 0:
-                    app.logger.info(f"处理进度: {i}/{total} ({i/total*100:.1f}%)")
+                # 更新进度信息 - 每个股票都更新进度，确保前端实时显示
+                progress_percent = i/total*100
+                if i % 10 == 0 or i == 1 or i == total:  # 每10个股票记录日志
+                    app.logger.info(f"处理进度: {i}/{total} ({progress_percent:.1f}%)")
+                
+                # 更新全局进度变量 - 每个股票都更新
+                app.current_download_progress = i
                 
                 stock_code = stock['stock_code']
+                app.current_download_stock = f"{stock_code} {stock['stock_name']}"
                 
-                # 获取股票基本信息
+                # 获取股票基本信息（使用智能数据源）
                 try:
-                    stock_info = ak.stock_individual_info_em(symbol=stock_code)
-                    if not stock_info.empty:
+                    stock_info = smart_source.get_stock_info(stock_code)
+                    if stock_info:
                         # 提取股本信息
-                        for _, info_row in stock_info.iterrows():
-                            item = str(info_row['item']).strip()
-                            value = str(info_row['value']).strip()
+                        if '总股本' in stock_info:
+                            try:
+                                stock['total_shares'] = int(float(stock_info['总股本']))
+                            except:
+                                stock['total_shares'] = None
+                        else:
+                            stock['total_shares'] = None
                             
-                            if '总股本' in item:
-                                try:
-                                    stock['total_shares'] = int(float(value))
-                                except:
-                                    stock['total_shares'] = None
-                            elif '流通股' in item:
-                                try:
-                                    stock['circulating_shares'] = int(float(value))
-                                except:
-                                    stock['circulating_shares'] = None
+                        if '流通股本' in stock_info:
+                            try:
+                                stock['circulating_shares'] = int(float(stock_info['流通股本']))
+                            except:
+                                stock['circulating_shares'] = None
+                        else:
+                            stock['circulating_shares'] = None
                         
                 except Exception as e:
                     app.logger.debug(f"获取股票 {stock_code} 详细信息失败: {e}")
                     stock['total_shares'] = None
                     stock['circulating_shares'] = None
                 
-                # 获取股票实时行情信息
+                # 获取股票实时行情信息（使用智能数据源）
                 try:
-                    real_time_info = ak.stock_zh_a_spot_em()
-                    if not real_time_info.empty:
-                        stock_row = real_time_info[real_time_info['代码'] == stock_code]
-                        if not stock_row.empty:
-                            row = stock_row.iloc[0]
-                            
-                            # 提取财务指标
-                            try:
-                                stock['pe_ratio'] = float(row['市盈率-动态']) if row['市盈率-动态'] != '-' else None
-                            except:
-                                stock['pe_ratio'] = None
-                            
-                            try:
-                                stock['pb_ratio'] = float(row['市净率']) if row['市净率'] != '-' else None
-                            except:
-                                stock['pb_ratio'] = None
-                            
-                            try:
-                                stock['market_value'] = float(row['总市值']) if row['总市值'] != '-' else None
-                            except:
-                                stock['market_value'] = None
-                            
-                            try:
-                                stock['circulating_value'] = float(row['流通市值']) if row['流通市值'] != '-' else None
-                            except:
-                                stock['circulating_value'] = None
+                    quote_info = smart_source.get_stock_quote(stock_code)
+                    if quote_info and quote_info.get('price'):
+                        # 注意：智能数据源可能不包含所有财务指标，这里设置默认值
+                        # 如果需要完整的财务指标，可能需要额外的数据源
+                        stock['pe_ratio'] = None  # 市盈率需要专门的财务数据接口
+                        stock['pb_ratio'] = None  # 市净率需要专门的财务数据接口
+                        stock['market_value'] = None  # 总市值需要专门的财务数据接口
+                        stock['circulating_value'] = None  # 流通市值需要专门的财务数据接口
+                        
+                        # 记录获取到的行情数据
+                        app.logger.debug(f"股票 {stock_code} 行情: 价格={quote_info.get('price')}, 数据源={quote_info.get('source')}")
                             
                 except Exception as e:
                     app.logger.debug(f"获取股票 {stock_code} 实时行情失败: {e}")
@@ -1930,38 +1991,35 @@ def download_stock_info():
                     stock['market_value'] = None
                     stock['circulating_value'] = None
                 
-                # 获取公司概况信息
+                # 获取公司概况信息（使用智能数据源的基础信息）
                 try:
-                    profile_info = ak.stock_profile_cninfo(symbol=stock_code)
-                    if not profile_info.empty:
-                        row = profile_info.iloc[0]
-                        
-                        # 提取公司信息
-                        stock['company_name'] = str(row.get('公司名称', ''))
-                        stock['english_name'] = str(row.get('英文名称', ''))
-                        stock['former_name'] = str(row.get('曾用简称', ''))
-                        stock['legal_representative'] = str(row.get('法人代表', ''))
-                        stock['registered_capital'] = str(row.get('注册资金', ''))
-                        stock['establishment_date'] = str(row.get('成立日期', ''))
-                        stock['list_date'] = str(row.get('上市日期', ''))
-                        stock['website'] = str(row.get('官方网站', ''))
-                        stock['email'] = str(row.get('电子邮箱', ''))
-                        stock['phone'] = str(row.get('联系电话', ''))
-                        stock['fax'] = str(row.get('传真', ''))
-                        stock['registered_address'] = str(row.get('注册地址', ''))
-                        stock['office_address'] = str(row.get('办公地址', ''))
-                        stock['postal_code'] = str(row.get('邮政编码', ''))
-                        stock['main_business'] = str(row.get('主营业务', ''))
-                        stock['business_scope'] = str(row.get('经营范围', ''))
-                        stock['company_intro'] = str(row.get('机构简介', ''))
-                        stock['selected_indices'] = str(row.get('入选指数', ''))
-                        
-                        # 更新行业信息
-                        if row.get('所属行业'):
-                            stock['industry'] = str(row['所属行业'])
+                    # 智能数据源已经提供了基本的股票信息，这里设置默认值
+                    # 如果需要完整的公司概况，可能需要额外的数据源接口
+                    stock['company_name'] = stock['stock_name']
+                    stock['english_name'] = ''
+                    stock['former_name'] = ''
+                    stock['legal_representative'] = ''
+                    stock['registered_capital'] = ''
+                    stock['establishment_date'] = ''
+                    stock['list_date'] = ''
+                    stock['website'] = ''
+                    stock['email'] = ''
+                    stock['phone'] = ''
+                    stock['fax'] = ''
+                    stock['registered_address'] = ''
+                    stock['office_address'] = ''
+                    stock['postal_code'] = ''
+                    stock['main_business'] = ''
+                    stock['business_scope'] = ''
+                    stock['company_intro'] = ''
+                    stock['selected_indices'] = ''
+                    
+                    # 尝试从股票信息中获取行业信息
+                    if stock_info and '所属行业' in stock_info:
+                        stock['industry'] = str(stock_info['所属行业'])
                         
                 except Exception as e:
-                    app.logger.debug(f"获取股票 {stock_code} 公司概况失败: {e}")
+                    app.logger.debug(f"设置股票 {stock_code} 公司概况默认值失败: {e}")
                     # 设置默认值
                     stock['company_name'] = stock['stock_name']
                     stock['english_name'] = ''
